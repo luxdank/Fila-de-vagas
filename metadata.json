@@ -1,0 +1,6 @@
+{
+  "name": "Fila de Vagas",
+  "description": "Aplicativo para gerenciar uma fila de participantes e distribuir vagas de forma igualitária, persistindo as rodadas e o histórico localmente.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
