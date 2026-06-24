@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global safety net (default-deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    // Validation helper to enforce data integrity on write
+    function isValidState(data) {
+      return data.keys().hasAll(['fila', 'ultimaDistribuicao', 'historico'])
+        && data.keys().size() == 3
+        && data.fila is list
+        && data.ultimaDistribuicao is list
+        && data.historico is list;
+    }
+
+    // Main state document configuration
+    match /state/main {
+      allow read: if true;
+      allow create, update: if isValidState(request.resource.data);
+      allow delete: if false;
+    }
+  }
+}

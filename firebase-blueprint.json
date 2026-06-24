@@ -1,0 +1,80 @@
+{
+  "entities": {
+    "Participante": {
+      "title": "Participante",
+      "description": "Um participante na fila",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "ID numérico único"
+        },
+        "nome": {
+          "type": "string",
+          "description": "Nome em letras maiúsculas"
+        }
+      },
+      "required": ["id", "nome"]
+    },
+    "DistribuicaoItem": {
+      "title": "DistribuicaoItem",
+      "description": "Item que indica vagas recebidas por um participante na última distribuição",
+      "type": "object",
+      "properties": {
+        "nome": {
+          "type": "string"
+        },
+        "vagas": {
+          "type": "number"
+        }
+      },
+      "required": ["nome", "vagas"]
+    },
+    "HistoricoItem": {
+      "title": "HistoricoItem",
+      "description": "Registro histórico de uma rodada de distribuição",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number"
+        },
+        "rodada": {
+          "type": "number"
+        },
+        "dataHora": {
+          "type": "string"
+        },
+        "vagas": {
+          "type": "number"
+        },
+        "distribuicao": {
+          "type": "array"
+        }
+      },
+      "required": ["id", "rodada", "dataHora", "vagas", "distribuicao"]
+    },
+    "State": {
+      "title": "State",
+      "description": "O estado principal compartilhado da fila de vagas",
+      "type": "object",
+      "properties": {
+        "fila": {
+          "type": "array"
+        },
+        "ultimaDistribuicao": {
+          "type": "array"
+        },
+        "historico": {
+          "type": "array"
+        }
+      },
+      "required": ["fila", "ultimaDistribuicao", "historico"]
+    }
+  },
+  "firestore": {
+    "state/main": {
+      "schema": "State",
+      "description": "Documento de estado principal que sincroniza a fila e histórico em tempo real"
+    }
+  }
+}

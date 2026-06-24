@@ -20,6 +20,8 @@ import {
   ArrowRightLeft
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from './firebase';
 import { Participante, DistribuicaoItem, HistoricoItem } from './types';
 import { distribuirVagas, rotacionarFila } from './utils/distribution';
 
@@ -38,7 +40,7 @@ const FILA_INICIAL: Participante[] = [
 const LOCAL_STORAGE_KEY = 'fila_vagas';
 
 export default function App() {
-  // State from LocalStorage or default
+  // State from LocalStorage or default (used as instant cache before Firebase loads)
   const [fila, setFila] = useState<Participante[]>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
@@ -88,6 +90,8 @@ export default function App() {
   const [vagasInput, setVagasInput] = useState<string>('');
   const [novoNome, setNovoNome] = useState<string>('');
   const [mensagem, setMensagem] = useState<{ tipo: 'sucesso' | 'erro' | 'info', texto: string } | null>(null);
+  const [carregandoFirebase, setCarregandoFirebase] = useState<boolean>(true);
+  const [nuvemSincronizada, setNuvemSincronizada] = useState<boolean>(false);
   
   // Dialog confirmation state to bypass window.confirm in iframe environments
   const [dialogoConfirmacao, setDialogoConfirmacao] = useState<{
@@ -109,14 +113,71 @@ export default function App() {
   // Expand state for history rounds
   const [historicoExpandido, setHistoricoExpandido] = useState<Record<string, boolean>>({});
 
-  // Auto-save to LocalStorage on state change
+  // Real-time server sync via Firestore
   useEffect(() => {
+    const docRef = doc(db, 'state', 'main');
+    const unsub = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (Array.isArray(data.fila)) setFila(data.fila);
+        if (Array.isArray(data.ultimaDistribuicao)) setUltimaDistribuicao(data.ultimaDistribuicao);
+        if (Array.isArray(data.historico)) setHistorico(data.historico);
+        
+        // Save to LocalStorage as cache
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
+          fila: data.fila || [],
+          ultimaDistribuicao: data.ultimaDistribuicao || [],
+          historico: data.historico || []
+        }));
+      } else {
+        // Initialize Firestore with current state (LocalStorage or defaults)
+        setDoc(docRef, {
+          fila,
+          ultimaDistribuicao,
+          historico
+        }).catch(err => {
+          handleFirestoreError(err, OperationType.WRITE, 'state/main');
+        });
+      }
+      setCarregandoFirebase(false);
+      setNuvemSincronizada(true);
+    }, (error) => {
+      setCarregandoFirebase(false);
+      setNuvemSincronizada(false);
+      handleFirestoreError(error, OperationType.GET, 'state/main');
+    });
+
+    return () => unsub();
+  }, []);
+
+  // Central function to update Firestore and local cache
+  const atualizarBanco = async (
+    novasFila: Participante[],
+    novasDistribuicao: DistribuicaoItem[],
+    novosHistorico: HistoricoItem[]
+  ) => {
+    // Optimistic local update
+    setFila(novasFila);
+    setUltimaDistribuicao(novasDistribuicao);
+    setHistorico(novosHistorico);
+
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
-      fila,
-      ultimaDistribuicao,
-      historico
+      fila: novasFila,
+      ultimaDistribuicao: novasDistribuicao,
+      historico: novosHistorico
     }));
-  }, [fila, ultimaDistribuicao, historico]);
+
+    try {
+      const docRef = doc(db, 'state', 'main');
+      await setDoc(docRef, {
+        fila: novasFila,
+        ultimaDistribuicao: novasDistribuicao,
+        historico: novosHistorico
+      });
+    } catch (e) {
+      handleFirestoreError(e, OperationType.WRITE, 'state/main');
+    }
+  };
 
   // Flash message helper
   const mostrarMensagem = (texto: string, tipo: 'sucesso' | 'erro' | 'info' = 'sucesso') => {
@@ -144,14 +205,15 @@ export default function App() {
     // Generate unique ID
     const novoId = fila.length > 0 ? Math.max(...fila.map(p => p.id)) + 1 : 1;
     const novosParticipantes = [...fila, { id: novoId, nome: nomeLimpo }];
-    setFila(novosParticipantes);
+    atualizarBanco(novosParticipantes, ultimaDistribuicao, historico);
     setNovoNome('');
     mostrarMensagem(`"${nomeLimpo}" adicionado(a) à fila!`, "sucesso");
   };
 
   // Delete participant
   const handleExcluirParticipante = (id: number, nome: string) => {
-    setFila(fila.filter(p => p.id !== id));
+    const novaFila = fila.filter(p => p.id !== id);
+    atualizarBanco(novaFila, ultimaDistribuicao, historico);
     mostrarMensagem(`"${nome}" removido(a) da fila.`, "info");
   };
 
@@ -162,7 +224,7 @@ export default function App() {
     const temp = novaFila[index];
     novaFila[index] = novaFila[index - 1];
     novaFila[index - 1] = temp;
-    setFila(novaFila);
+    atualizarBanco(novaFila, ultimaDistribuicao, historico);
   };
 
   // Move participant down
@@ -172,7 +234,7 @@ export default function App() {
     const temp = novaFila[index];
     novaFila[index] = novaFila[index + 1];
     novaFila[index + 1] = temp;
-    setFila(novaFila);
+    atualizarBanco(novaFila, ultimaDistribuicao, historico);
   };
 
   // Start inline editing
@@ -195,7 +257,8 @@ export default function App() {
       return;
     }
 
-    setFila(fila.map(p => p.id === id ? { ...p, nome: nomeLimpo } : p));
+    const novaFila = fila.map(p => p.id === id ? { ...p, nome: nomeLimpo } : p);
+    atualizarBanco(novaFila, ultimaDistribuicao, historico);
     setEditandoId(null);
     mostrarMensagem("Nome atualizado com sucesso!");
   };
@@ -204,7 +267,7 @@ export default function App() {
   const handleEmbaralharFila = () => {
     if (fila.length <= 1) return;
     const novaFila = [...fila].sort(() => Math.random() - 0.5);
-    setFila(novaFila);
+    atualizarBanco(novaFila, ultimaDistribuicao, historico);
     mostrarMensagem("Fila embaralhada aleatoriamente!", "info");
   };
 
@@ -223,7 +286,6 @@ export default function App() {
 
     // Distribute equally
     const resultado = distribuirVagas(fila, totalVagas);
-    setUltimaDistribuicao(resultado);
 
     // Create history item
     const novaRodada = historico.length + 1;
@@ -244,11 +306,10 @@ export default function App() {
       distribuicao: resultado
     };
 
-    setHistorico([novoHistoricoItem, ...historico]);
-
-    // Handle rotation (always rotate on distribution to serve unserved next)
+    const novoHistorico = [novoHistoricoItem, ...historico];
     const filaRotacionada = rotacionarFila(fila, totalVagas);
-    setFila(filaRotacionada);
+
+    atualizarBanco(filaRotacionada, resultado, novoHistorico);
     mostrarMensagem(`Distribuição de ${totalVagas} vagas realizada! A fila rodou para servir quem não pegou ainda.`, "sucesso");
   };
 
@@ -290,27 +351,24 @@ export default function App() {
       return item;
     });
 
-    setUltimaDistribuicao(novaDistribuicao);
-
     // Move the recipient (who is getting served/receiving the vacancy) to the end of the queue
+    let novaFila = [...fila];
     const indexNoFila = fila.findIndex(p => p.nome === receptor.nome);
     if (indexNoFila !== -1) {
-      const novaFila = [...fila];
       const [removido] = novaFila.splice(indexNoFila, 1);
       novaFila.push(removido);
-      setFila(novaFila);
     }
 
     // Update latest history record if it matches this distribution
-    if (historico.length > 0) {
-      const novasRodadas = [...historico];
-      novasRodadas[0] = {
-        ...novasRodadas[0],
+    let novoHistorico = [...historico];
+    if (novoHistorico.length > 0) {
+      novoHistorico[0] = {
+        ...novoHistorico[0],
         distribuicao: novaDistribuicao
       };
-      setHistorico(novasRodadas);
     }
 
+    atualizarBanco(novaFila, novaDistribuicao, novoHistorico);
     mostrarMensagem(`1 vaga passada de "${doador.nome}" para "${receptor.nome}". A fila rodou para servir quem não pegou ainda!`, "sucesso");
   };
 
@@ -339,7 +397,7 @@ export default function App() {
   // Clear inputs and active distribution screen
   const handleLimpar = () => {
     setVagasInput('');
-    setUltimaDistribuicao([]);
+    atualizarBanco(fila, [], historico);
     mostrarMensagem("Distribuição limpa do painel.", "info");
   };
 
@@ -347,14 +405,13 @@ export default function App() {
   const confirmarAcao = () => {
     const { tipo } = dialogoConfirmacao;
     if (tipo === 'reiniciar') {
-      setFila(FILA_INICIAL);
+      atualizarBanco(FILA_INICIAL, ultimaDistribuicao, historico);
       mostrarMensagem("Fila reiniciada com os participantes padrão.", "sucesso");
     } else if (tipo === 'esvaziar') {
-      setFila([]);
-      setUltimaDistribuicao([]);
+      atualizarBanco([], [], historico);
       mostrarMensagem("Fila de participantes esvaziada.", "info");
     } else if (tipo === 'limpar-historico') {
-      setHistorico([]);
+      atualizarBanco(fila, ultimaDistribuicao, []);
       mostrarMensagem("Histórico apagado com sucesso.", "info");
     }
     setDialogoConfirmacao({ aberto: false, tipo: null, titulo: '', mensagem: '' });
@@ -404,23 +461,48 @@ export default function App() {
       <header className="max-w-7xl w-full mx-auto flex flex-col md:flex-row justify-between items-start md:items-end border-b-4 border-slate-900 pb-6 mb-10 gap-4" id="app-header">
         <div>
           <h1 className="text-4xl md:text-5xl font-black tracking-tighter uppercase text-slate-900" id="header-title">Fila de Vagas</h1>
-          <p className="text-slate-500 font-medium mt-1 uppercase tracking-widest text-xs sm:text-sm">Gestão de Distribuição Equitativa • LocalStorage</p>
+          <p className="text-slate-500 font-medium mt-1 uppercase tracking-widest text-xs sm:text-sm">Gestão de Distribuição Equitativa • Servidor Firestore</p>
         </div>
         <div className="text-left md:text-right flex md:flex-col items-center md:items-end justify-between w-full md:w-auto border-t md:border-t-0 pt-3 md:pt-0 border-slate-200">
           <div>
             <span className="block text-[10px] md:text-xs font-bold text-slate-400 uppercase">Status do Sistema</span>
-            <span className="text-emerald-600 font-bold uppercase tracking-tight text-sm md:text-base flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
-              Banco Local Ativo
-            </span>
+            {carregandoFirebase ? (
+              <span className="text-amber-600 font-bold uppercase tracking-tight text-sm md:text-base flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block animate-bounce"></span>
+                Conectando...
+              </span>
+            ) : nuvemSincronizada ? (
+              <span className="text-emerald-600 font-bold uppercase tracking-tight text-sm md:text-base flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
+                Servidor Sincronizado
+              </span>
+            ) : (
+              <span className="text-rose-600 font-bold uppercase tracking-tight text-sm md:text-base flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block"></span>
+                Modo Offline
+              </span>
+            )}
           </div>
           <div className="flex gap-1.5 mt-1">
-            <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold bg-slate-200 border border-slate-900 text-slate-800 uppercase">
-              Offline
-            </span>
-            <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold bg-indigo-100 border border-slate-900 text-indigo-950 uppercase">
-              No-Cloud
-            </span>
+            {nuvemSincronizada ? (
+              <>
+                <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold bg-emerald-100 border border-slate-900 text-emerald-950 uppercase animate-pulse">
+                  Online
+                </span>
+                <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold bg-blue-100 border border-slate-900 text-blue-950 uppercase">
+                  Compartilhado
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold bg-slate-200 border border-slate-900 text-slate-800 uppercase">
+                  Offline
+                </span>
+                <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold bg-indigo-100 border border-slate-900 text-indigo-950 uppercase">
+                  Cache Local
+                </span>
+              </>
+            )}
           </div>
         </div>
       </header>
@@ -1011,7 +1093,10 @@ export default function App() {
 
       {/* Elegant Footer */}
       <footer className="max-w-7xl w-full mx-auto bg-slate-900 text-white p-6 mt-16 border-t-4 border-blue-600 flex flex-col md:flex-row justify-between items-center gap-4 text-xs">
-        <p className="font-black tracking-tight uppercase">© 2026 FILA DE VAGAS • EQUIDADE & TRANSPARÊNCIA</p>
+        <div className="flex flex-col gap-1 text-center md:text-left">
+          <p className="font-black tracking-tight uppercase">© 2026 FILA DE VAGAS • EQUIDADE & TRANSPARÊNCIA</p>
+          <p className="text-[10px] text-blue-400 font-bold uppercase tracking-wider">Direitos do projeto atribuídos a Luiz Henrique</p>
+        </div>
         <p className="text-slate-400 font-mono">SALVO AUTOMATICAMENTE EM LOCALSTORAGE • SEM SERVIDORES EXTERNOS</p>
       </footer>
 
